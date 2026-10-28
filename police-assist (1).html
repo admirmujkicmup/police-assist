@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="bs"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Police Assist</title>
+<style>
+:root{--ink:#14202e;--bg:#f6f8fa;--line:#d5dce3;--ac:#1f5fa8;--bad:#a4281c;--ok:#1d6b3a;color-scheme:light dark}
+@media(prefers-color-scheme:dark){:root{--ink:#e6ebf0;--bg:#121a23;--line:#2c3a48;--ac:#6aa7ee;--bad:#ff8a7d;--ok:#6fd08f}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+main{max-width:760px;margin:0 auto;padding:12px}.auth{min-height:100svh;display:grid;place-items:center}
+form,.col{display:grid;gap:10px}label{display:grid;gap:4px;font-weight:600}
+input,textarea,select{font:inherit;padding:10px;border:1px solid var(--line);border-radius:6px;background:transparent;color:inherit;width:100%}
+button{font:inherit;font-weight:600;padding:10px 14px;border:0;border-radius:6px;background:var(--ac);color:#fff;min-height:44px}
+button.g{background:transparent;color:var(--ac);border:1px solid var(--line)}button:disabled{opacity:.5}
+:focus-visible{outline:3px solid var(--ac);outline-offset:2px}
+.card{border:1px solid var(--line);border-radius:8px;padding:12px;margin:10px 0}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.hint{opacity:.75;font-size:.9rem}.err{color:var(--bad)}.ok{color:var(--ok)}
+header{display:flex;justify-content:space-between;align-items:center;gap:8px}h1,h2{margin:6px 0}h2{font-size:1.1rem}
+dt{font-weight:600;margin-top:8px}dd{margin:0;white-space:pre-wrap}nav{display:flex;gap:6px;overflow-x:auto;margin:8px 0}nav button{white-space:nowrap}
+progress{width:100%}
+</style></head><body><div id="app"></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.0/dist/umd/supabase.js"></script>
+<script>
+// ===== KONFIGURACIJA: upiši svoje podatke (anon ključ je javan; service_role NIKADA ovdje) =====
+const CONFIG={URL:'https://iujnprgioaxjfjinlbrp.supabase.co',KEY:''};
+// ================================================================================================
+const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const today=()=>new Date().toISOString().slice(0,10),fmt=d=>d?new Date(d).toLocaleString('bs'):'—';
+let sb;const S={page:'login',view:'assistant',jur:'Sve',q:'',hits:null,recs:[],sync:'checking',chats:[],rate:1,msg:'',prog:0,li:0};
+const SYNC={ok:['Sinhronizovano','ok'],update:['Ažuriranje dostupno','err'],updating:['Ažuriranje u toku',''],failed:['Sinhronizacija nije uspjela','err'],unconfirmed:['Aktuelnost baze nije potvrđena','err'],unpublished:['Baza nije objavljena','err'],checking:['Provjera…','']};
+// ---- IndexedDB (lokalni cache; jedan atomski zapis = nema polovične baze) ----
+const idb=()=>new Promise((res,rej)=>{const r=indexedDB.open('pa',1);r.onupgradeneeded=()=>r.result.createObjectStore('kv');r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)});
+const kvGet=async k=>{try{const d=await idb();return await new Promise(r=>{const q=d.transaction('kv').objectStore('kv').get(k);q.onsuccess=()=>r(q.result);q.onerror=()=>r(undefined)})}catch{return undefined}};
+const kvSet=async(k,v)=>{const d=await idb();return new Promise((res,rej)=>{const t=d.transaction('kv','readwrite');t.objectStore('kv').put(v,k);t.oncomplete=res;t.onerror=()=>rej(t.error)})};
+// ---- Pretraga ----
+const norm=s=>(s||'').toLowerCase().replace(/đ/g,'d').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/dj/g,'d');
+const STOP=new Set('i u je da se za na o od li koji koja koje sta sto ili sa po kao ne ova ovaj ovo su bi'.split(' '));
+const stem=t=>t.length>6?t.slice(0,-2):t.length>4?t.slice(0,-1):t;
+function search(recs,query,jur){const q=norm(query),art=(q.match(/(?:clan|clana|clanu|cl\.?)\s*(\d+[a-z]?)/)||[])[1];
+ const tk=q.replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter(t=>t.length>=3&&!STOP.has(t)).map(stem),out=[];
+ for(const r of recs){if(jur&&r.jurisdiction!==jur)continue;const f=[norm(r.title),norm(r.act_name),norm(r.elements),norm(r.provision_text),norm(r.sanction)],w=[5,3,2,2,1];let s=0;
+  for(const t of tk)f.forEach((x,i)=>{if(x.includes(t))s+=w[i]});if(art&&norm(r.article)===art)s+=10;if(s>=4)out.push({r,s})}
+ return out.sort((a,b)=>b.s-a.s).slice(0,5).map(x=>x.r)}
+const M='nije evidentirano — provjeriti u službenom izvoru';
+const ref=r=>[r.article&&'član '+r.article,r.paragraph&&'stav '+r.paragraph,r.point&&'tačka '+r.point].filter(Boolean).join(', ')||M;
+const toText=r=>`Naziv prekršaja: ${r.title}\nPravni osnov: ${r.act_name} (${r.jurisdiction})${r.gazette_ref?', '+r.gazette_ref:''}\nČlan/stav/tačka: ${ref(r)}\nElementi: ${r.elements||M}\nSankcija: ${r.sanction||M}\nDodatne mjere: ${r.additional_measures||M}\nIzvor: ${r.source_url||M}\nProvjera: ${r.last_verified_at||'nije provjereno'}; baza v${S.local?.version||'?'}\nStatus: ${r.verification_status}`;
+// ---- Boot / prijava ----
+async function boot(){if(!CONFIG.URL||!CONFIG.KEY){$('#app').innerHTML='<main class="auth"><div class="card"><h1>Police Assist</h1><p>Upišite URL i anon ključ u CONFIG na vrhu skripte.</p></div></main>';return}
+ sb=supabase.createClient(CONFIG.URL,CONFIG.KEY);const{data}=await sb.auth.getSession();data.session?afterLogin():go('login')}
+function go(p,m){S.page=p;S.msg=m||'';render()}
+async function loadProfile(){const{data:s}=await sb.auth.getSession();if(!s.session)return null;const{data,error}=await sb.from('profiles').select('*').eq('id',s.session.user.id).single();
+ if(error)return'ERR';if(!data.is_active||data.is_blocked){await sb.auth.signOut();return null}return data}
+async function afterLogin(){const p=await loadProfile();if(p==='ERR')return go('login','Server nije dostupan.');if(!p)return go('login','Nalog nije aktivan.');S.profile=p;
+ if(p.must_change_password)return go('chpw');await checkSync();S.view='assistant';go('main');loadChats()}
+async function checkSync(){S.sync='checking';try{const{data:st,error}=await sb.from('app_state').select('current_version_id').single();if(error)throw error;
+ if(!st.current_version_id){S.sync='unpublished';S.recs=[];return}
+ const{data:v}=await sb.from('published_versions').select('*').eq('id',st.current_version_id).single();S.remote=v;const c=await kvGet('cur');
+ if(c&&c.meta.id===v.id){S.recs=c.recs;S.local=c.meta;S.sync='ok'}else{S.recs=[];S.local=c?c.meta:null;S.sync='update'}}
+ catch{const c=await kvGet('cur');if(c){S.recs=c.recs;S.local=c.meta;S.sync='unconfirmed'}else S.sync='failed'}}
+async function doUpdate(){S.sync='updating';S.prog=0;render();try{const v=S.remote;let all=[];
+ for(let f=0;;f+=500){const{data,error}=await sb.from('published_records').select('data').eq('version_id',v.id).range(f,f+499);if(error)throw error;all=all.concat(data);S.prog=Math.min(99,Math.round(all.length/Math.max(1,v.record_count)*100));render();if(data.length<500)break}
+ if(all.length!==v.record_count)throw 0;const{data:c}=await sb.from('app_state').select('current_version_id').single();if(c.current_version_id!==v.id)throw 0;
+ const meta={id:v.id,version:v.version,published_at:v.published_at};await kvSet('cur',{meta,recs:all.map(x=>x.data)});
+ S.recs=all.map(x=>x.data);S.local=meta;S.sync='ok';await sb.from('sync_log').insert({user_id:S.profile.id,device:navigator.userAgent.slice(0,80),version_id:v.id,status:'ok'})}
+ catch{S.sync='failed'}render()}
+// ---- Prikaz ----
+function render(){const a=$('#app');
+ if(S.page==='login')return a.innerHTML=`<main class="auth"><form data-f="login" class="card" style="width:100%;max-width:380px"><h1>Police Assist</h1><label>Korisničko ime<input name="u" autocomplete="username" required></label><label>Lozinka<input name="p" type="password" autocomplete="current-password" required></label>${S.msg?`<p class="err" role="alert">${esc(S.msg)}</p>`:''}<button>Prijavi se</button><p class="hint">Pristup imaju samo nalozi koje je dodao administrator.</p></form></main>`;
+ if(S.page==='chpw')return a.innerHTML=`<main class="auth"><form data-f="chpw" class="card" style="width:100%;max-width:380px"><h1>Nova lozinka</h1><p class="hint">Početnu lozinku morate promijeniti (min. 10 znakova).</p><label>Nova lozinka<input name="a" type="password" autocomplete="new-password" required></label><label>Ponovite<input name="b" type="password" autocomplete="new-password" required></label>${S.msg?`<p class="err" role="alert">${esc(S.msg)}</p>`:''}<button>Sačuvaj</button></form></main>`;
+ const adm=S.profile.role==='super_admin',[sl,sc]=SYNC[S.sync];
+ const tabs=[['assistant','Asistent'],['history','Historija'],...(adm?[['learn','Učenje baze'],['admin','Kontrolna tabla'],['users','Korisnici']]:[])];
+ a.innerHTML=`<main><header><strong>Police Assist</strong><span class="hint">${esc(S.profile.full_name)}</span><button class="g" data-a="out">Odjava</button></header>
+ <p class="hint">Baza: v${esc(S.local?.version||'—')} · <span class="${sc}">${sl}</span> <button class="g" data-a="resync">Provjeri ažuriranje</button></p>
+ <nav>${tabs.map(t=>`<button class="${S.view===t[0]?'':'g'}" data-a="tab" data-v="${t[0]}">${t[1]}</button>`).join('')}</nav><div id="body">${body()}</div></main>`}
+function body(){const v=S.view;if(v==='assistant')return assistant();if(v==='history')return history();if(v==='learn')return learn();if(v==='admin')return admin();if(v==='users')return users();return''}
+function assistant(){if(S.sync==='update'||S.sync==='updating'||(S.sync==='failed'&&!S.recs.length)){const r=S.remote||{};
+ return`<div class="card"><h2>POTREBNO AŽURIRANJE BAZE PODATAKA</h2><p>Instalirana: ${esc(S.local?.version||'nema')}<br>Dostupna: ${esc(r.version||'?')} (${fmt(r.published_at)})</p>${S.sync==='updating'?`<progress max="100" value="${S.prog}"></progress><p>${S.prog}%</p>`:`${S.sync==='failed'?'<p class="err" role="alert">Ažuriranje nije uspjelo. Postojeća baza je netaknuta. Pokušajte ponovo.</p>':''}<button data-a="update">AŽURIRAJ BAZU</button>`}<p class="hint">Pretraga je blokirana dok se ažuriranje ne završi.</p></div>`}
+ if(S.sync==='unpublished')return'<p class="card">Baza još nije objavljena.</p>';
+ const sp=window.SpeechRecognition||window.webkitSpeechRecognition,tts='speechSynthesis'in window;
+ return`<form data-f="ask"><label>Pitanje ili opis situacije<textarea id="q" rows="3" placeholder="npr. Koja je sankcija za nepostupanje po naredbi policijskog službenika?">${esc(S.q)}</textarea></label>
+ <div class="row">${['Sve','BiH','FBiH','USK'].map(j=>`<button type="button" class="${S.jur===j?'':'g'}" data-a="jur" data-v="${j}">${j}</button>`).join('')}${sp?'<button type="button" class="g" data-a="mic">Diktiraj</button>':''}</div>
+ ${S.sync==='unconfirmed'?'<p class="err">Aktuelnost baze nije potvrđena — ograničeni offline režim, podaci mogu biti zastarjeli.</p>':''}<button>Pretraži bazu</button></form>
+ ${!sp?'<p class="hint">Diktiranje nije podržano u ovom pregledniku.</p>':''}
+ ${S.hits?(/činjeni|cinjeni|napiši|napisi/i.test(S.q)?'<p class="card hint">Sastavljanje činjeničnog opisa nije implementirano.</p>':'')+(S.hits.length?S.hits.map((r,i)=>card(r,i,tts)).join(''):'<p class="card">Nema potvrđenog zapisa u objavljenoj bazi. Ne navodim član ni sankciju bez izvora — provjerite u službenom glasniku.</p>'):''}`}
+function card(r,i,tts){const t=r.verification_status;return`<article class="card"><h2>${esc(r.title)}</h2>${t==='TESTNI PODACI'?'<p class="err"><b>TESTNI PODACI — nije važeće pravo.</b></p>':t!=='POTVRDJENO'?'<p class="err">POTREBNA PROVJERA u službenom izvoru.</p>':''}
+ <dl><dt>Pravni osnov</dt><dd>${esc(r.act_name)} (${esc(r.jurisdiction)})${r.gazette_ref?', '+esc(r.gazette_ref):''}</dd><dt>Član, stav, tačka</dt><dd>${esc(ref(r))}</dd><dt>Elementi prekršaja</dt><dd>${esc(r.elements||M)}</dd><dt>Sankcija</dt><dd>${esc(r.sanction||M)}</dd>${r.additional_measures?`<dt>Dodatne mjere</dt><dd>${esc(r.additional_measures)}</dd>`:''}<dt>Izvor</dt><dd>${esc(r.source_url||'nije evidentiran')}</dd><dt>Provjera</dt><dd>${esc(r.last_verified_at||'nije provjereno')} · baza v${esc(S.local?.version||'?')}</dd></dl>
+ <div class="row"><button class="g" data-a="copy" data-i="${i}">Kopiraj odgovor</button>${tts?`<button class="g" data-a="speak" data-i="${i}">Čitaj</button><button class="g" data-a="stop">Zaustavi</button><select id="rate" aria-label="Brzina"><option>0.8</option><option selected>1</option><option>1.2</option><option>1.5</option></select>`:''}${S.profile.can_propose?`<button class="g" data-a="propose" data-i="${i}">Predloži ispravku</button>`:''}</div></article>`}
+function history(){const f=S.hf||'';return`<input id="hf" placeholder="Pretraži historiju" value="${esc(f)}"><ul style="list-style:none;padding:0">${S.chats.filter(c=>c.title.toLowerCase().includes(f.toLowerCase())).map(c=>`<li class="row card"><button class="g" data-a="rerun" data-t="${esc(c.title)}">${esc(c.title)}</button><button class="g" data-a="delchat" data-id="${c.id}">Obriši</button></li>`).join('')||'<li class="hint">Nema pretraga.</li>'}</ul>`}
+const F=[['title','Naziv prekršaja'],['act_name','Naziv propisa'],['jurisdiction','Nadležnost (BiH/FBiH/USK…)'],['gazette_ref','Službeni glasnik'],['article','Član'],['paragraph','Stav'],['point','Tačka'],['provision_text','Tekst odredbe'],['elements','Elementi prekršaja'],['sanction','Sankcija'],['additional_measures','Dodatne mjere'],['source_url','Izvor / link']];
+const fld=([k,l])=>{const v=S.edit==='new'?'':(S.work[S.li]?.[k]??'');return k==='provision_text'||k==='elements'?`<label>${l}<textarea name="${k}" rows="3">${esc(v)}</textarea></label>`:`<label>${l}<input name="${k}" value="${esc(v)}"></label>`};
+function learn(){if(!S.work)return'<p>Učitavanje…</p>';const r=S.work[S.li];let h=`<div class="card"><b>Zapisa: ${S.work.length}</b> <button class="g" data-a="newrec">Novi zapis</button> <button class="g" data-a="export">Izvoz JSON</button></div>`;
+ if(S.props?.length)h+=`<div class="card"><h2>Prijedlozi korisnika (${S.props.length})</h2>${S.props.map(p=>`<p>${esc(p.explanation||'')}<br><button data-a="prop" data-id="${p.id}" data-ok="1">Odobri</button> <button class="g" data-a="prop" data-id="${p.id}" data-ok="0">Odbij</button></p>`).join('')}</div>`;
+ if(S.edit)return h+`<form data-f="save" class="card"><h2>${S.edit==='new'?'Novi zapis':'Ispravka zapisa'}</h2>${F.map(fld).join('')}<label>Razlog izmjene (obavezno)<input name="reason" required></label><div class="row"><button>Sačuvaj</button><button type="button" class="g" data-a="cancel">Odustani</button></div></form>`;
+ if(!r)return h+'<p class="card">Radna baza je prazna. Dodajte prvi zapis.</p>';
+ return h+`<article class="card"><p class="hint">${S.li+1} / ${S.work.length}</p><h2>${esc(r.title)}</h2><dl><dt>Pravni osnov</dt><dd>${esc(r.act_name)} (${esc(r.jurisdiction)})</dd><dt>Član, stav, tačka</dt><dd>${esc(ref(r))}</dd><dt>Elementi</dt><dd>${esc(r.elements||M)}</dd><dt>Sankcija</dt><dd>${esc(r.sanction||M)}</dd><dt>Izvor</dt><dd>${esc(r.source_url||'—')}</dd><dt>Provjera</dt><dd>${esc(r.last_verified_at||'—')} · ${esc(r.verification_status)}${r.status==='withdrawn'?' · POVUČEN':''}</dd></dl>
+ <div class="row"><button data-a="vd" data-v="ok">Tačno</button><button class="g" data-a="edit">Predloži ispravku</button><button class="g" data-a="vd" data-v="bad">Netačno</button><button class="g" data-a="vd" data-v="missing">Nedostaje podatak</button><button class="g" data-a="vd" data-v="src">Potrebna provjera izvora</button><button class="g" data-a="vd" data-v="wd">Povuci zapis</button></div>
+ <div class="row" style="margin-top:8px"><button class="g" data-a="nav" data-d="-1">‹ Prethodni</button><button class="g" data-a="nav" data-d="1">Sljedeći ›</button></div></article>`}
+function admin(){const s=S.stats;if(!s)return'<p>Učitavanje…</p>';return`<div class="card"><h2>Stanje</h2><p>Aktivni korisnici: ${s.active_users} · Deaktivirani/blokirani: ${s.inactive_users}<br>Pravnih zapisa: ${s.records} · Čeka provjeru: ${s.needs_check}<br>Prijedloga ispravki: ${s.proposals}<br>Objavljena verzija: ${esc(s.version||'nema')} (${fmt(s.published_at)})<br>Izmjena od posljednjeg objavljivanja: ${s.changes}</p></div>
+ <div class="card"><h2>PUBLISH DATA</h2><p class="hint">Kolege dobijaju promjene tek nakon objavljivanja. Prije toga provjerite zapise (stranica Učenje baze).</p><label>Opis promjena<textarea id="notes" rows="2"></textarea></label><button data-a="publish" style="margin-top:8px">PUBLISH DATA</button></div>
+ <div class="card"><h2>Historija objavljivanja</h2>${(S.vers||[]).map(v=>`<p><b>v${esc(v.version)}</b> · ${fmt(v.published_at)}<br>+${v.added??0} / ~${v.modified??0} / −${v.removed??0} · ${esc(v.notes||'')}<br><button class="g" data-a="rollback" data-id="${v.id}" data-v="${esc(v.version)}">Vrati ovu verziju</button></p>`).join('')}</div>`}
+function users(){return`<form data-f="adduser" class="card"><h2>Dodaj korisnika</h2><label>Ime i prezime<input name="n" required></label><label>Korisničko ime (mala slova, brojevi, . _ -)<input name="u" pattern="[a-z0-9._-]{3,32}" required></label><label>Početna lozinka (min. 10)<input name="p" minlength="10" required></label><button>Dodaj korisnika</button></form>
+ ${(S.users||[]).map(u=>`<div class="card"><b>${esc(u.full_name)}</b> <span class="hint">@${esc(u.username)} · ${u.role==='super_admin'?'Super admin':'Korisnik'}</span><br><span class="hint">Kreiran ${fmt(u.created_at)} · Prijava ${fmt(u.last_login_at)} · ${u.is_blocked?'Blokiran':u.is_active?'Aktivan':'Deaktiviran'}</span>${u.role==='super_admin'?'':`<div class="row"><button class="g" data-a="ua" data-k="set_active" data-id="${u.id}" data-val="${!u.is_active}">${u.is_active?'Deaktiviraj':'Aktiviraj'}</button><button class="g" data-a="ua" data-k="set_blocked" data-id="${u.id}" data-val="${!u.is_blocked}">${u.is_blocked?'Odblokiraj':'Blokiraj'}</button><button class="g" data-a="ua" data-k="reset_password" data-id="${u.id}">Resetuj lozinku</button><button class="g" data-a="ua" data-k="set_propose" data-id="${u.id}" data-val="${!u.can_propose}">${u.can_propose?'Ukloni predlaganje':'Dozvoli predlaganje'}</button></div>`}</div>`).join('')}`}
+// ---- Podaci ----
+async function loadChats(){const{data}=await sb.from('chat_history').select('id,title').order('updated_at',{ascending:false}).limit(50);S.chats=data||[]}
+async function loadWork(){const{data}=await sb.from('legal_records').select('*').order('title');S.work=data||[];const{data:p}=await sb.from('correction_proposals').select('*').eq('status','pending');S.props=p||[];render()}
+async function loadAdmin(){const{data}=await sb.rpc('dashboard_stats');S.stats=data;const{data:v}=await sb.from('published_versions').select('*').order('id',{ascending:false}).limit(20);S.vers=v||[];render()}
+async function loadUsers(){const{data}=await sb.from('profiles').select('*').order('created_at',{ascending:false});S.users=data||[];render()}
+async function fn(body){const{data,error}=await sb.functions.invoke('admin-users',{body});const e=error?(data?.error||'Radnja nije uspjela.'):data?.error;if(e)alert(e);return!e}
+async function saveRec(id,data,reason){const{error}=await sb.rpc('save_record',{p_id:id,p_data:data,p_reason:reason});if(error)return alert('Greška: '+error.message);S.edit=null;await loadWork()}
+async function ask(t){S.q=t;S.hits=search(S.recs,t,S.jur==='Sve'?undefined:S.jur);render();await sb.from('chat_history').insert({title:t.slice(0,80),messages:[{q:t,ids:S.hits.map(r=>r.id),ts:new Date().toISOString()}]});loadChats()}
+// ---- Događaji ----
+const A={
+ async out(){await sb.auth.signOut();S.profile=null;go('login')},
+ async resync(){await checkSync();render()},update:doUpdate,
+ tab(d){S.view=d.v;S.edit=null;render();if(d.v==='learn')loadWork();if(d.v==='admin')loadAdmin();if(d.v==='users')loadUsers()},
+ jur(d){S.q=$('#q')?.value||S.q;S.jur=d.v;render()},
+ async copy(d){try{await navigator.clipboard.writeText(toText(S.hits[d.i]));alert('Kopirano')}catch{alert('Kopiranje nije podržano.')}},
+ speak(d){speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(toText(S.hits[d.i]));u.lang='bs-BA';u.rate=+($('#rate')?.value||1);speechSynthesis.speak(u)},stop(){speechSynthesis.cancel()},
+ mic(){const R=window.SpeechRecognition||window.webkitSpeechRecognition,r=new R();r.lang='bs-BA';r.onresult=e=>{$('#q').value=e.results[0][0].transcript};r.onerror=()=>alert('Diktiranje nije uspjelo.');r.start()},
+ async propose(d){const t=prompt('Opišite predloženu ispravku:');if(!t)return;const{error}=await sb.from('correction_proposals').insert({record_id:S.hits[d.i].id,proposed_by:S.profile.id,verdict:'PREDLOZI_ISPRAVKU',explanation:t});alert(error?'Slanje nije uspjelo.':'Prijedlog poslan administratoru.')},
+ rerun(d){S.view='assistant';S.q=d.t;render();ask(d.t)},async delchat(d){await sb.from('chat_history').delete().eq('id',d.id);await loadChats();render()},
+ newrec(){S.edit='new';render()},edit(){S.edit='edit';render()},cancel(){S.edit=null;render()},nav(d){S.li=Math.max(0,Math.min(S.work.length-1,S.li+ +d.d));render()},
+ async vd(d){const r=S.work[S.li];const m={ok:[{verification_status:'POTVRDJENO',last_verified_at:today()},'Provjereno: tačno'],bad:[{verification_status:'NETACNO'},'Označeno netačnim'],missing:[{verification_status:'POTREBNA PROVJERA'},'Nedostaje podatak'],src:[{verification_status:'POTREBNA PROVJERA'},'Potrebna provjera izvora'],wd:[{status:'withdrawn'},'Zapis povučen']}[d.v];
+  if(d.v==='ok'&&!confirm('Potvrđujete da ste podatak uporedili sa službenim izvorom?'))return;await saveRec(r.id,m[0],m[1])},
+ async prop(d){const{error}=await sb.rpc('resolve_proposal',{p_id:d.id,p_approve:d.ok==='1'});if(error)alert(error.message);loadWork()},
+ export(){const b=new Blob([JSON.stringify(S.work,null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='police-assist-backup-'+today()+'.json';a.click()},
+ async publish(){const n=$('#notes').value;if(!n.trim())return alert('Opis promjena je obavezan.');if(!confirm('Objaviti novu verziju svim korisnicima?'))return;const{data,error}=await sb.rpc('publish_data',{p_notes:n});alert(error?'Objavljivanje nije uspjelo; stara verzija ostaje. '+error.message:'Objavljena verzija '+data);loadAdmin()},
+ async rollback(d){if(!confirm('Vratiti objavljenu verziju na v'+d.v+'?'))return;const{error}=await sb.rpc('rollback_to_version',{p_version_id:+d.id});if(error)alert(error.message);loadAdmin()},
+ async ua(d){const b={action:d.k,id:d.id};if(d.k==='reset_password'){const p=prompt('Nova početna lozinka (min. 10 znakova)');if(!p)return;b.password=p}else b.value=d.val==='true';if(await fn(b))loadUsers()}};
+document.addEventListener('click',e=>{const a=e.target.closest('[data-a]');if(a&&A[a.dataset.a])A[a.dataset.a](a.dataset)});
+document.addEventListener('input',e=>{if(e.target.id==='hf'){S.hf=e.target.value;const p=e.target.selectionStart;render();const i=$('#hf');i.focus();i.setSelectionRange(p,p)}});
+document.addEventListener('submit',async e=>{e.preventDefault();const f=e.target,k=f.dataset.f,d=Object.fromEntries(new FormData(f));
+ if(k==='login'){const{error}=await sb.auth.signInWithPassword({email:d.u.trim().toLowerCase()+'@police-assist.invalid',password:d.p});if(error)return go('login','Pogrešno korisničko ime ili lozinka.');afterLogin()}
+ if(k==='chpw'){if(d.a.length<10)return go('chpw','Najmanje 10 znakova.');if(d.a!==d.b)return go('chpw','Lozinke se ne podudaraju.');const{error}=await sb.auth.updateUser({password:d.a});if(error)return go('chpw','Promjena nije uspjela.');await sb.rpc('mark_password_changed');afterLogin()}
+ if(k==='ask'&&d.q?.trim())ask(d.q.trim());
+ if(k==='save'){const{reason,...rest}=d;if(S.edit==='edit')await saveRec(S.work[S.li].id,rest,reason);else{rest.last_verified_at=null;delete rest.last_verified_at;await saveRec(null,rest,reason)}}
+ if(k==='adduser'&&await fn({action:'create',username:d.u,full_name:d.n,password:d.p}))loadUsers()});
+boot();
+</script></body></html>
